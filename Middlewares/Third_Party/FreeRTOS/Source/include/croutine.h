@@ -29,11 +29,9 @@
 #define CO_ROUTINE_H
 
 #ifndef INC_FREERTOS_H
-	
+	#error "include FreeRTOS.h must appear in source files before include croutine.h"
 #endif
 
-#include "FreeRTOS.h"
-#include "FreeRTOSConfig.h"  
 #include "list.h"
 
 #ifdef __cplusplus

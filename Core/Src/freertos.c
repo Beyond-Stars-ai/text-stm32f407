@@ -167,10 +167,10 @@ void StartBuzzerTask(void *argument)
       psc = 0;
     }
 
-    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, pwm);
     __HAL_TIM_SET_PRESCALER(&htim4, psc);
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, pwm);
      
-    osDelay(1);
+    osDelay(250);
   }
   /* USER CODE END StartBuzzerTask */
 }
