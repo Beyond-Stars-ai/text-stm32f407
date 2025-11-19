@@ -47,6 +47,10 @@
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
 
+// 外部函数声明
+void uart_receive_handler(UART_HandleTypeDef *huart);
+void Update_Motor_Measure(uint8_t motor_id, motor_measure_t* measure);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -63,6 +67,9 @@ extern UART_HandleTypeDef huart3;
 extern TIM_HandleTypeDef htim6;
 
 /* USER CODE BEGIN EV */
+
+// 外部变量声明
+extern motor_measure_t motor_chassis[4];
 
 /* USER CODE END EV */
 
@@ -213,7 +220,8 @@ void USART1_IRQHandler(void)
 void USART3_IRQHandler(void)
 {
   /* USER CODE BEGIN USART3_IRQn 0 */
-
+  // 处理遥控器串口空闲中断
+  uart_receive_handler(&huart3);
   /* USER CODE END USART3_IRQn 0 */
   HAL_UART_IRQHandler(&huart3);
   /* USER CODE BEGIN USART3_IRQn 1 */
@@ -250,5 +258,45 @@ void DMA2_Stream7_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+// CAN 接收 FIFO0 消息挂起回调函数
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+    CAN_RxHeaderTypeDef rx_header;
+    uint8_t rx_data[8];
+    
+    if (hcan->Instance == CAN1)
+    {
+        HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header, rx_data);
+        
+        switch (rx_header.StdId)
+        {
+            case 1:
+            case 2:
+            case 3:
+            case 4:
+            {
+                static uint8_t i = 0;
+                // 读取电机ID
+                i = rx_header.StdId - 1;
+                
+                // 更新电机测量数据
+                motor_chassis[i].last_ecd = motor_chassis[i].ecd;
+                motor_chassis[i].ecd = (uint16_t)((rx_data)[0] << 8 | (rx_data)[1]);
+                motor_chassis[i].speed_rpm = (uint16_t)((rx_data)[2] << 8 | (rx_data)[3]);
+                motor_chassis[i].given_current = (uint16_t)((rx_data)[4] << 8 | (rx_data)[5]);
+                motor_chassis[i].temperate = (rx_data)[6];
+                
+                // 更新到控制器
+                Update_Motor_Measure(i, &motor_chassis[i]);
+                break;
+            }
+            default:
+            {
+                break;
+            }
+        }
+    }
+}
 
 /* USER CODE END 1 */

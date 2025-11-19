@@ -23,6 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "stdio.h"
+#include "string.h"
+#include "stdlib.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -69,7 +71,32 @@ const osThreadAttr_t ReceiveTask_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
+/* Definitions for CANTask */
+osThreadId_t CANTaskHandle;
+const osThreadAttr_t CANTask_attributes = {
+  .name = "CANTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for ControlQueue */
+osMessageQueueId_t ControlQueueHandle;
+const osMessageQueueAttr_t ControlQueue_attributes = {
+  .name = "ControlQueue"
+};
 /* USER CODE BEGIN PV */
+
+// 遥控器相关全局变量
+uint8_t   dbus_buf[DBUS_BUFLEN];
+rc_info_t rc = rc_Init;
+
+// 电机相关全局变量
+motor_measure_t motor_chassis[4] = {0};
+Motor_Controller_t motor_controller[4] = {0};
+int16_t motor_commands[4] = {0};
+
+// CAN 发送相关变量
+static CAN_TxHeaderTypeDef  chassis_tx_message;
+static uint8_t              chassis_can_send_data[8];
 
 /* USER CODE END PV */
 
@@ -83,13 +110,317 @@ static void MX_CAN1_Init(void);
 void StartDebugTask(void *argument);
 void StartLEDTask(void *argument);
 void StartReceiveTask(void *argument);
+void StartCANTask(void *argument);
 
 /* USER CODE BEGIN PFP */
+
+// 遥控器相关函数声明
+void uart_receive_handler(UART_HandleTypeDef *huart);
+void dbus_uart_init(void);
+void rc_callback_handler(rc_info_t *rc, uint8_t *buff);
+
+// 电机控制相关函数声明
+void CAN_cmd_chassis(int16_t motor1, int16_t motor2, int16_t motor3, int16_t motor4);
+void can_filter_init(void);
+void Update_Motor_Measure(uint8_t motor_id, motor_measure_t* measure);
+void Motor_PID_Init(void);
+void PID_Init(PID_Controller_t* pid, float kp, float ki, float kd, float integral_limit, float output_limit);
+float PID_Calculate(PID_Controller_t* pid, float error, float dt);
+void Set_Motor_Target_Speed(uint8_t motor_id, float target_speed_rad_s);
+void Motor_Speed_Control_Task(float dt);
+void Drive_Motor(float vx, float vy, float vz);
+float Map_Remote_to_Speed(int16_t input, float max_speed);
+void Process_Remote_Control(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+// 自定义 DMA 接收函数（不使用中断）
+static int uart_receive_dma_no_it(UART_HandleTypeDef* huart, uint8_t* pData, uint32_t Size)
+{
+  uint32_t tmp1 = 0;
+  tmp1 = huart->RxState;
+	
+	if (tmp1 == HAL_UART_STATE_READY)
+	{
+		if ((pData == NULL) || (Size == 0))
+		{
+			return HAL_ERROR;
+		}
+ 
+		huart->pRxBuffPtr = pData;
+		huart->RxXferSize = Size;
+		huart->ErrorCode  = HAL_UART_ERROR_NONE;
+ 
+		HAL_DMA_Start(huart->hdmarx, (uint32_t)&huart->Instance->DR, (uint32_t)pData, Size);
+		
+	
+		SET_BIT(huart->Instance->CR3, USART_CR3_DMAR);
+		
+		return HAL_OK;
+	}
+	else
+	{
+		return HAL_BUSY;
+	}
+}
+
+// 获取当前 DMA 数据计数器
+uint16_t dma_current_data_counter(DMA_Stream_TypeDef *dma_stream)
+{
+  return ((uint16_t)(dma_stream->NDTR));
+}
+
+// 遥控器数据解析函数
+void rc_callback_handler(rc_info_t *rc, uint8_t *buff)
+{
+  rc->ch0 = (buff[0] | buff[1] << 8) & 0x07FF;
+  rc->ch0 -= 1024;
+  rc->ch1 = (buff[1] >> 3 | buff[2] << 5) & 0x07FF;
+  rc->ch1 -= 1024;
+  rc->ch2 = (buff[2] >> 6 | buff[3] << 2 | buff[4] << 10) & 0x07FF;
+  rc->ch2 -= 1024;
+  rc->ch3 = (buff[4] >> 1 | buff[5] << 7) & 0x07FF;
+  rc->ch3 -= 1024;
+  rc->roll = (buff[16] | (buff[17] << 8)) & 0x07FF;  
+  rc->roll -= 1024;
+ 
+  rc->sw1 = ((buff[5] >> 4) & 0x000C) >> 2;
+  rc->sw2 = (buff[5] >> 4) & 0x0003;
+	
+  if ((abs(rc->ch0) > 660) || \
+      (abs(rc->ch1) > 660) || \
+      (abs(rc->ch2) > 660) || \
+      (abs(rc->ch3) > 660))
+  {
+    memset(rc, 0, sizeof(rc_info_t));
+  }		
+}
+
+// UART 空闲中断回调函数
+static void uart_rx_idle_callback(UART_HandleTypeDef* huart)
+{
+	__HAL_UART_CLEAR_IDLEFLAG(huart);
+	
+	if (huart == &DBUS_HUART)
+	{
+		__HAL_DMA_DISABLE(huart->hdmarx);
+ 
+		if ((DBUS_MAX_LEN - dma_current_data_counter(huart->hdmarx->Instance)) == DBUS_BUFLEN)
+		{
+			rc_callback_handler(&rc, dbus_buf);	
+		}
+		__HAL_DMA_SET_COUNTER(huart->hdmarx, DBUS_MAX_LEN);
+		__HAL_DMA_ENABLE(huart->hdmarx);
+	}
+}
+
+// UART 接收处理函数
+void uart_receive_handler(UART_HandleTypeDef *huart)
+{
+	if (__HAL_UART_GET_FLAG(huart, UART_FLAG_IDLE) && 
+			__HAL_UART_GET_IT_SOURCE(huart, UART_IT_IDLE))
+	{
+		uart_rx_idle_callback(huart);
+	}
+}
+
+// 遥控器串口初始化
+void dbus_uart_init(void)
+{
+	__HAL_UART_CLEAR_IDLEFLAG(&DBUS_HUART);
+	__HAL_UART_ENABLE_IT(&DBUS_HUART, UART_IT_IDLE);
+	uart_receive_dma_no_it(&DBUS_HUART, dbus_buf, DBUS_MAX_LEN);
+}
+
+// RPM 转 rad/s
+float RPM_To_RadPerSec(int16_t rpm)
+{
+    return (float)rpm * 2.0f * 3.1415926535f / 60.0f;
+}
+
+// rad/s 转 RPM
+int16_t RadPerSec_To_RPM(float rad_per_sec)
+{
+    return (int16_t)(rad_per_sec * 60.0f / (2.0f * 3.1415926535f));
+}
+
+// PID 控制器初始化
+void PID_Init(PID_Controller_t* pid, float kp, float ki, float kd, float integral_limit, float output_limit)
+{
+    pid->kp = kp;
+    pid->ki = ki;
+    pid->kd = kd;
+    pid->integral = 0.0f;
+    pid->prev_error = 0.0f;
+    pid->output = 0.0f;
+    pid->integral_limit = integral_limit;
+    pid->output_limit = output_limit;
+}
+
+// PID 计算函数
+float PID_Calculate(PID_Controller_t* pid, float error, float dt)
+{
+    // 比例项
+    float proportional = pid->kp * error;
+    
+    // 积分项（带限幅）
+    pid->integral += error * dt;
+    if (pid->integral > pid->integral_limit) {
+        pid->integral = pid->integral_limit;
+    } else if (pid->integral < -pid->integral_limit) {
+        pid->integral = -pid->integral_limit;
+    }
+    float integral = pid->ki * pid->integral;
+    
+    // 微分项
+    float derivative = pid->kd * (error - pid->prev_error) / dt;
+    pid->prev_error = error;
+    
+    // 计算总输出
+    pid->output = proportional + integral + derivative;
+    
+    // 输出限幅
+    if (pid->output > pid->output_limit) {
+        pid->output = pid->output_limit;
+    } else if (pid->output < -pid->output_limit) {
+        pid->output = -pid->output_limit;
+    }
+    
+    return pid->output;
+}
+
+// 更新电机测量数据
+void Update_Motor_Measure(uint8_t motor_id, motor_measure_t* measure)
+{
+    if (motor_id < 4) {
+        motor_controller[motor_id].measure = *measure;
+    }
+}
+
+// 初始化所有电机的 PID 控制器
+void Motor_PID_Init(void)
+{
+    // PID参数（需要根据实际电机调试）
+    float speed_kp = 32.0f;      // 速度环比例系数
+    float speed_ki = 0.8f;      // 速度环积分系数
+    float speed_kd = 0.2f;      // 速度环微分系数
+    
+    for (int i = 0; i < 4; i++) {
+        PID_Init(&motor_controller[i].speed_pid, speed_kp, speed_ki, speed_kd, 3000.0f, 3000.0f);
+    }
+}
+
+// 设置单个电机的目标速度
+void Set_Motor_Target_Speed(uint8_t motor_id, float target_speed_rad_s)
+{
+    if (motor_id < 4) {
+        motor_controller[motor_id].target_speed = target_speed_rad_s;
+    }
+}
+
+// 电机速度控制任务
+void Motor_Speed_Control_Task(float dt)
+{
+    for (int i = 0; i < 4; i++) {
+        // 将电机反馈的RPM转换为rad/s
+        float actual_speed_rads = RPM_To_RadPerSec(motor_controller[i].measure.speed_rpm);
+        
+        // 计算速度误差（单位：rad/s）
+        float speed_error = motor_controller[i].target_speed - actual_speed_rads;
+        
+        // PID计算
+        float pid_output = PID_Calculate(&motor_controller[i].speed_pid, speed_error, dt);
+        
+        // 存储控制命令
+        motor_commands[i] = (int16_t)pid_output;
+    }
+}
+
+// 麦克纳姆轮速度解算函数
+void Drive_Motor(float vx, float vy, float vz)
+{
+    float A = WHEELBASE_WIDTH + WHEELBASE_LENGTH;
+    
+    // 标准麦克纳姆轮运动学逆解算公式
+    // 轮子编号：0-右上, 1-左上, 2-左下, 3-右下
+    float wheel1_speed = ( vx - vy + vz * A) / WHEEL_RADIUS;  // 右上轮
+    float wheel2_speed = ( vx + vy + vz * A) / WHEEL_RADIUS;  // 左上轮
+    float wheel3_speed = (-vx + vy + vz * A) / WHEEL_RADIUS;  // 左下轮
+    float wheel4_speed = (-vx - vy + vz * A) / WHEEL_RADIUS;  // 右下轮
+
+    Set_Motor_Target_Speed(0, wheel1_speed);  // 右上轮
+    Set_Motor_Target_Speed(1, wheel2_speed);  // 左上轮
+    Set_Motor_Target_Speed(2, wheel3_speed);  // 左下轮
+    Set_Motor_Target_Speed(3, wheel4_speed);  // 右下轮
+}
+
+// 遥控器值映射到速度
+float Map_Remote_to_Speed(int16_t input, float max_speed)
+{
+    if (input > 660) input = 660;
+    if (input < -660) input = -660;
+    
+    // 死区内直接返回0
+    if (abs(input) < 50) {
+        return 0.0f;
+    }
+    
+    // 不在死区内，正常计算速度
+    return (input / 660.0f) * max_speed;
+}
+
+// 处理遥控器数据并设置底盘速度
+void Process_Remote_Control(void)
+{
+    // 映射遥控器值到速度 (m/s)
+    float vx = Map_Remote_to_Speed(rc.ch2, 2.0f);   // 前后方向，最大2m/s
+    float vy = Map_Remote_to_Speed(rc.ch3, 2.0f);  // 左右方向，最大2m/s  
+    float vz = Map_Remote_to_Speed(rc.ch0, 3.0f);   // 旋转方向，最大3rad/s
+    
+    // 调用运动学解算
+    Drive_Motor(vx, vy, vz);
+}
+
+// CAN 总线数据发送函数
+void CAN_cmd_chassis(int16_t motor1, int16_t motor2, int16_t motor3, int16_t motor4)
+{
+    uint32_t send_mail_box;
+    chassis_tx_message.StdId = 0x200;
+    chassis_tx_message.IDE = CAN_ID_STD;
+    chassis_tx_message.RTR = CAN_RTR_DATA;
+    chassis_tx_message.DLC = 0x08;
+    chassis_can_send_data[0] = motor1 >> 8;
+    chassis_can_send_data[1] = motor1;
+    chassis_can_send_data[2] = motor2 >> 8;
+    chassis_can_send_data[3] = motor2;
+    chassis_can_send_data[4] = motor3 >> 8;
+    chassis_can_send_data[5] = motor3;
+    chassis_can_send_data[6] = motor4 >> 8;
+    chassis_can_send_data[7] = motor4;
+    HAL_CAN_AddTxMessage(&hcan1, &chassis_tx_message, 
+        chassis_can_send_data, &send_mail_box);
+}
+
+// CAN 滤波器初始化
+void can_filter_init(void)
+{
+    CAN_FilterTypeDef can_filter_st;
+    can_filter_st.FilterActivation = ENABLE;
+    can_filter_st.FilterMode = CAN_FILTERMODE_IDMASK;
+    can_filter_st.FilterScale = CAN_FILTERSCALE_32BIT;
+    can_filter_st.FilterIdHigh = 0x0000;
+    can_filter_st.FilterIdLow = 0x0000;
+    can_filter_st.FilterMaskIdHigh = 0x0000;
+    can_filter_st.FilterMaskIdLow = 0x0007;
+    can_filter_st.FilterBank = 0;
+    can_filter_st.FilterFIFOAssignment = CAN_RX_FIFO0;
+    HAL_CAN_ConfigFilter(&hcan1, &can_filter_st);
+    HAL_CAN_Start(&hcan1);
+    HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+}
 
 /* USER CODE END 0 */
 
@@ -127,7 +458,10 @@ int main(void)
   MX_USART3_UART_Init();
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
-
+  dbus_uart_init();
+  HAL_CAN_Start(&hcan1);
+  Motor_PID_Init();
+  can_filter_init();
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -145,6 +479,10 @@ int main(void)
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
+  /* Create the queue(s) */
+  /* creation of ControlQueue */
+  ControlQueueHandle = osMessageQueueNew (16, sizeof(uint16_t), &ControlQueue_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -158,6 +496,9 @@ int main(void)
 
   /* creation of ReceiveTask */
   ReceiveTaskHandle = osThreadNew(StartReceiveTask, NULL, &ReceiveTask_attributes);
+
+  /* creation of CANTask */
+  CANTaskHandle = osThreadNew(StartCANTask, NULL, &CANTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -455,12 +796,62 @@ void StartLEDTask(void *argument)
 void StartReceiveTask(void *argument)
 {
   /* USER CODE BEGIN StartReceiveTask */
+  printf("ReceiveTask is running...\r\n");
+  
+  // 初始化遥控器串口接收
+  dbus_uart_init();
+  
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    // 这里可以添加遥控器数据处理逻辑
+    // 例如：检查遥控器数据是否更新，处理异常等
+    
+    osDelay(10);  // 10ms 周期检查
   }
   /* USER CODE END StartReceiveTask */
+}
+
+/* USER CODE BEGIN Header_StartCANTask */
+/**
+* @brief Function implementing the CANTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartCANTask */
+void StartCANTask(void *argument)
+{
+  /* USER CODE BEGIN StartCANTask */
+  printf("CANTask is running...\r\n");
+  
+  uint32_t last_control_time = 0;
+  uint32_t dt = 0;
+  
+  /* Infinite loop */
+  for(;;)
+  {
+    uint32_t current_time = HAL_GetTick();
+   
+    // 控制任务：固定频率执行（50Hz，20ms）
+    if (current_time - last_control_time >= 20)
+    {
+      dt = (current_time - last_control_time) * 0.001f;
+      
+      // 处理遥控器数据并计算目标速度
+      Process_Remote_Control();
+      
+      // 执行电机速度控制
+      Motor_Speed_Control_Task(dt);
+      
+      // 发送 CAN 命令到电机
+      CAN_cmd_chassis(motor_commands[0], motor_commands[1], motor_commands[2], motor_commands[3]);
+      
+      last_control_time = current_time;
+    }
+    
+    osDelay(1);  // 1ms 基础延迟
+  }
+  /* USER CODE END StartCANTask */
 }
 
 /**
