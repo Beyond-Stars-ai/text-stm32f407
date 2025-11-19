@@ -62,6 +62,13 @@ const osThreadAttr_t LEDTask_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
+/* Definitions for ReceiveTask */
+osThreadId_t ReceiveTaskHandle;
+const osThreadAttr_t ReceiveTask_attributes = {
+  .name = "ReceiveTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -71,10 +78,11 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_CAN1_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_CAN1_Init(void);
 void StartDebugTask(void *argument);
 void StartLEDTask(void *argument);
+void StartReceiveTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -116,8 +124,8 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_USART1_UART_Init();
-  MX_CAN1_Init();
   MX_USART3_UART_Init();
+  MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -147,6 +155,9 @@ int main(void)
 
   /* creation of LEDTask */
   LEDTaskHandle = osThreadNew(StartLEDTask, NULL, &LEDTask_attributes);
+
+  /* creation of ReceiveTask */
+  ReceiveTaskHandle = osThreadNew(StartReceiveTask, NULL, &ReceiveTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -237,11 +248,11 @@ static void MX_CAN1_Init(void)
 
   /* USER CODE END CAN1_Init 1 */
   hcan1.Instance = CAN1;
-  hcan1.Init.Prescaler = 16;
+  hcan1.Init.Prescaler = 7;
   hcan1.Init.Mode = CAN_MODE_NORMAL;
   hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan1.Init.TimeSeg1 = CAN_BS1_1TQ;
-  hcan1.Init.TimeSeg2 = CAN_BS2_1TQ;
+  hcan1.Init.TimeSeg1 = CAN_BS1_2TQ;
+  hcan1.Init.TimeSeg2 = CAN_BS2_3TQ;
   hcan1.Init.TimeTriggeredMode = DISABLE;
   hcan1.Init.AutoBusOff = DISABLE;
   hcan1.Init.AutoWakeUp = DISABLE;
@@ -310,7 +321,7 @@ static void MX_USART3_UART_Init(void)
   huart3.Init.BaudRate = 100000;
   huart3.Init.WordLength = UART_WORDLENGTH_8B;
   huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_EVEN;
+  huart3.Init.Parity = UART_PARITY_NONE;
   huart3.Init.Mode = UART_MODE_TX_RX;
   huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart3.Init.OverSampling = UART_OVERSAMPLING_16;
@@ -357,8 +368,9 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
 
@@ -431,6 +443,24 @@ void StartLEDTask(void *argument)
     osDelay(200);
   }
   /* USER CODE END StartLEDTask */
+}
+
+/* USER CODE BEGIN Header_StartReceiveTask */
+/**
+* @brief Function implementing the ReceiveTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartReceiveTask */
+void StartReceiveTask(void *argument)
+{
+  /* USER CODE BEGIN StartReceiveTask */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartReceiveTask */
 }
 
 /**

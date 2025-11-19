@@ -87,7 +87,17 @@ targets:
         bin: ""
         interface: stlink
         target: stm32f1x
-    uploader: OpenOCD
+      STLink:
+        address: "0x08000000"
+        bin: ""
+        elFile: None
+        optionBytes: .eide/debug.st.option.bytes.ini
+        otherCmds: ""
+        proType: SWD
+        resetMode: default
+        runAfterProgram: true
+        speed: 4000
+    uploader: STLink
   Release:
     cppPreprocessAttrs:
       defineList:
