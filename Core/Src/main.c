@@ -589,10 +589,10 @@ static void MX_CAN1_Init(void)
 
   /* USER CODE END CAN1_Init 1 */
   hcan1.Instance = CAN1;
-  hcan1.Init.Prescaler = 7;
+  hcan1.Init.Prescaler = 3;
   hcan1.Init.Mode = CAN_MODE_NORMAL;
   hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan1.Init.TimeSeg1 = CAN_BS1_2TQ;
+  hcan1.Init.TimeSeg1 = CAN_BS1_10TQ;
   hcan1.Init.TimeSeg2 = CAN_BS2_3TQ;
   hcan1.Init.TimeTriggeredMode = DISABLE;
   hcan1.Init.AutoBusOff = DISABLE;
@@ -747,12 +747,30 @@ int _write(int fd, char *ptr, int len) {
 void StartDebugTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-  printf("&Debug Task is running...\r\n");
+  printf("Debug Task: Remote Control Monitor\r\n");
+  printf("CH0(旋转) CH1 CH2(前后) CH3(左右) SW1 SW2\r\n");
   /* Infinite loop */
   for(;;)
   {
-    printf("Hello World!\r\n");
-    osDelay(500);
+    // 打印遥控器通道值，用于调试信号传输问题
+    printf("RC: %4d %4d %4d %4d %d %d\r\n", 
+           rc.ch0, rc.ch1, rc.ch2, rc.ch3, rc.sw1, rc.sw2);
+    
+    // 检查遥控器数据是否有效（非零值表示有信号）
+    if (rc.ch0 != 0 || rc.ch1 != 0 || rc.ch2 != 0 || rc.ch3 != 0)
+    {
+      printf("RC Signal: ACTIVE\r\n");
+    }
+    else
+    {
+      printf("RC Signal: NO DATA\r\n");
+    }
+    
+    // 打印原始数据缓冲区的前几个字节，用于调试原始信号
+    printf("Raw: %02X %02X %02X %02X %02X %02X\r\n",
+           dbus_buf[0], dbus_buf[1], dbus_buf[2], dbus_buf[3], dbus_buf[4], dbus_buf[5]);
+    
+    osDelay(200);  // 200ms 刷新频率，便于观察信号变化
   }
   /* USER CODE END 5 */
 }
